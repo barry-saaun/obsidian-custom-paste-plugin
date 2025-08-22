@@ -1,11 +1,10 @@
 {
-	"id": "sample-plugin",
-	"name": "Sample Plugin",
+	"id": "barrys-custom-paste-plugin-obsidian-md",
+	"name": "A Custom Paste Plugin for Obsidian Markdow",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "Demonstrates some of the capabilities of the Obsidian API.",
-	"author": "Obsidian",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
+	"description": "Plugin BS",
+	"author": "Barry Saaun",
+	"authorUrl": "https://github.com/barry-saaun",
 	"isDesktopOnly": false
 }
