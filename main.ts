@@ -63,6 +63,7 @@ export default class PasteToNearestAssets extends Plugin {
 						}
 
 						const defaultBase = this.defaultPasteBasename();
+						const prefix = this.makeNamePrefix(activeFile.basename);
 						const ext =
 							this.getExtFromMime(imageFile.type) ?? "png";
 
@@ -70,6 +71,7 @@ export default class PasteToNearestAssets extends Plugin {
 							this.app,
 							defaultBase,
 							ext,
+							prefix,
 						);
 						if (name == null) {
 							// user cancelled
@@ -104,6 +106,12 @@ export default class PasteToNearestAssets extends Plugin {
 				},
 			),
 		);
+	}
+
+	makeNamePrefix(basename: string): string {
+		const cleaned = this.sanitizeBase(basename);
+
+		return cleaned ? `${cleaned}-` : "";
 	}
 
 	isInScope(file: TFile): boolean {
@@ -213,19 +221,21 @@ export default class PasteToNearestAssets extends Plugin {
 class NamePromptModal extends Modal {
 	private resolve!: (v: string | null) => void;
 	private defaultBase: string;
+	private prefix: string;
 	private ext: string;
 	private resolved = false;
 	private inputEl!: HTMLInputElement;
 
-	constructor(app: App, defaultBase: string, ext: string) {
+	constructor(app: App, defaultBase: string, ext: string, prefix: string) {
 		super(app);
 		this.defaultBase = defaultBase;
 		this.ext = ext;
+		this.prefix = prefix;
 	}
 
-	static open(app: App, defaultBase: string, ext: string) {
+	static open(app: App, defaultBase: string, ext: string, prefix: string) {
 		return new Promise<string | null>((resolve) => {
-			const m = new NamePromptModal(app, defaultBase, ext);
+			const m = new NamePromptModal(app, defaultBase, ext, prefix);
 			m.resolve = resolve;
 			m.open();
 		});
@@ -237,13 +247,18 @@ class NamePromptModal extends Modal {
 		contentEl.createEl("h3", { text: "Name your image" });
 
 		const wrapper = contentEl.createDiv({ cls: "ptna-input-wrap" });
-		this.inputEl = wrapper.createEl("input", {
-			type: "text",
-			value: this.defaultBase,
-		});
+		this.inputEl = wrapper.createEl("input", { type: "text" });
+
+		const initialValue = this.prefix + this.defaultBase;
+		this.inputEl.value = initialValue;
+
 		this.inputEl.style.width = "100%";
 		this.inputEl.focus();
-		this.inputEl.select();
+
+		const start = this.prefix.length;
+		const end = initialValue.length;
+
+		this.inputEl.setSelectionRange(start, end);
 
 		const hint = contentEl.createEl("div", {
 			text: `Extension will be .${this.ext}`,
@@ -269,9 +284,11 @@ class NamePromptModal extends Modal {
 
 	private finish() {
 		this.resolved = true;
-		const value = (this.inputEl?.value ?? "").trim();
+		let value = (this.inputEl.value ?? "").trim();
+		if (!value) value = this.prefix + this.defaultBase;
 		this.close();
-		this.resolve(value || this.defaultBase);
+
+		this.resolve(value);
 	}
 
 	private cancel() {
