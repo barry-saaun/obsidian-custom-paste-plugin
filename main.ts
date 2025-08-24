@@ -9,6 +9,7 @@ import {
 	TFile,
 	TFolder,
 	normalizePath,
+	EditorPosition,
 } from "obsidian";
 
 const TOP_FOLDER_SCOPE = "Uni Notes"; // Only run inside this top folder.
@@ -40,6 +41,10 @@ export default class PasteToNearestAssets extends Plugin {
 						// We are handling it; stop the default paste
 						evt.preventDefault();
 						evt.stopPropagation();
+
+						// Save current selection
+						const selectFrom = editor.getCursor("from");
+						const selectTo = editor.getCursor("to");
 
 						const activeFile = view.file;
 						const startFolder = activeFile.parent;
@@ -96,7 +101,34 @@ export default class PasteToNearestAssets extends Plugin {
 							created,
 							activeFile.path,
 						);
-						editor.replaceSelection("!" + link);
+
+						const targetView =
+							this.app.workspace.getActiveViewOfType(
+								MarkdownView,
+							);
+
+						const targetEditor = targetView?.editor ?? editor;
+
+						// Sava scroll position before maniuplating selection
+						const scrollInfo = targetEditor.getScrollInfo();
+
+						targetEditor.focus();
+						targetEditor.setSelection(selectFrom, selectTo);
+						targetEditor.replaceSelection(link);
+
+						const endPos = this.computeEndPos(selectFrom, link);
+						targetEditor.setCursor(endPos);
+
+						// restore scroll pos
+						targetEditor.scrollTo(scrollInfo.left, scrollInfo.top);
+
+						setTimeout(() => {
+							targetEditor.setCursor(endPos);
+							targetEditor.scrollTo(
+								scrollInfo.left,
+								scrollInfo.top,
+							);
+						}, 0);
 					} catch (e: any) {
 						console.error(e);
 						new Notice(
@@ -215,6 +247,19 @@ export default class PasteToNearestAssets extends Plugin {
 		const f: TAbstractFile | null =
 			this.app.vault.getAbstractFileByPath(path);
 		return !!f;
+	}
+
+	private computeEndPos(from: EditorPosition, text: string): EditorPosition {
+		const lines = text.split("\n");
+
+		if (lines.length === 1) {
+			return { line: from.line, ch: from.ch + lines[0].length };
+		}
+
+		return {
+			line: from.line + (lines.length - 1),
+			ch: lines[lines.length - 1].length,
+		};
 	}
 }
 
