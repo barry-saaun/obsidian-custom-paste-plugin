@@ -1,0 +1,10 @@
+{
+  "id": "barrys-custom-paste-plugin-obsidian-md",
+  "name": "Barry's Custom for Pasting Images",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Plugin BS",
+  "author": "Barry Saaun",
+  "authorUrl": "https://github.com/barry-saaun",
+  "isDesktopOnly": false
+}
