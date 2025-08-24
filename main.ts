@@ -1,128 +1,282 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin } from "obsidian";
+import {
+	App,
+	Editor,
+	MarkdownView,
+	Modal,
+	Notice,
+	Plugin,
+	TAbstractFile,
+	TFile,
+	TFolder,
+	normalizePath,
+} from "obsidian";
 
-export default class CustomPastePlugin extends Plugin {
-	async onload(): Promise<void> {
-		this.registerDomEvent(document, "paste", (event: ClipboardEvent) => {
-			const activeView =
-				this.app.workspace.getActiveViewOfType(MarkdownView);
-			if (!activeView) return;
+const TOP_FOLDER_SCOPE = "Uni Notes"; // Only run inside this top folder.
+const ASSETS_DIR_NAME = "assets";
 
-			const editor = activeView.editor;
+export default class PasteToNearestAssets extends Plugin {
+	async onload() {
+		this.registerEvent(
+			this.app.workspace.on(
+				"editor-paste",
+				async (
+					evt: ClipboardEvent,
+					editor: Editor,
+					view: MarkdownView,
+				) => {
+					try {
+						if (!view?.file) return;
+						if (!this.isInScope(view.file)) return;
 
-			const items = event.clipboardData?.items;
-			if (!items) return;
+						const fileList = evt.clipboardData?.files;
+						if (!fileList || fileList.length === 0) return;
 
-			for (const item of Array.from(items)) {
-				if (item.type.startsWith("images/")) {
-					event.preventDefault();
-					this.handleImagePaste(item, editor, activeView);
-				}
-			}
-		});
+						// Find first image in the clipboard
+						const imageFile = Array.from(fileList).find((f) =>
+							f.type.startsWith("image/"),
+						);
+						if (!imageFile) return;
+
+						// We are handling it; stop the default paste
+						evt.preventDefault();
+						evt.stopPropagation();
+
+						const activeFile = view.file;
+						const startFolder = activeFile.parent;
+						if (!startFolder) {
+							new Notice(
+								"No parent folder for the current file.",
+							);
+							return;
+						}
+
+						// Find nearest 'assets' folder walking up; if none, create under start
+						const assetsFolder =
+							(await this.findNearestAssetsFolder(startFolder)) ??
+							(await this.ensureAssetsUnder(startFolder));
+
+						if (!assetsFolder) {
+							new Notice(
+								"Could not locate or create assets folder.",
+							);
+							return;
+						}
+
+						const defaultBase = this.defaultPasteBasename();
+						const ext =
+							this.getExtFromMime(imageFile.type) ?? "png";
+
+						const name = await NamePromptModal.open(
+							this.app,
+							defaultBase,
+							ext,
+						);
+						if (name == null) {
+							// user cancelled
+							return;
+						}
+
+						const safeBase = this.sanitizeBase(name) || defaultBase;
+						const targetPath = await this.getUniquePath(
+							assetsFolder,
+							safeBase,
+							ext,
+						);
+
+						const arrayBuf = await imageFile.arrayBuffer();
+						const created = await this.app.vault.createBinary(
+							targetPath,
+							arrayBuf,
+						);
+
+						// Insert relative markdown image link
+						const link = this.app.fileManager.generateMarkdownLink(
+							created,
+							activeFile.path,
+						);
+						editor.replaceSelection("!" + link);
+					} catch (e: any) {
+						console.error(e);
+						new Notice(
+							"Paste to assets failed: " + e?.message ?? e,
+						);
+					}
+				},
+			),
+		);
 	}
 
-	async handleImagePaste(
-		item: DataTransferItem,
-		editor: Editor,
-		view: MarkdownView,
-	) {
-		const file = item.getAsFile();
-		if (!file) return;
-
-		const notePath = view.file?.path;
-		if (!notePath) return;
-
-		const assetsFolder = this.findAssetFolder(notePath);
-
-		// TODO:: adjust for the generic use case  where assets folder does not exist later
-		if (!assetsFolder) {
-			new Notice("No assets folder found in parent directories");
-			return;
-		}
-
-		const filename = await this.promptForFileName(file.name);
-
-		const arrayBuffer = await file.arrayBuffer();
-		const ext = file.type.split("/")[1];
-
-		const finalName = `${filename}.${ext}`;
-		const finalPath = `${assetsFolder}/${finalName}`;
-
-		await this.app.vault.createBinary(finalPath, arrayBuffer);
-
-		editor.replaceSelection(`![](${finalPath})`);
-		new Notice(`Image saved as ${finalPath}`);
+	isInScope(file: TFile): boolean {
+		if (!TOP_FOLDER_SCOPE) return true;
+		const scopePrefix = TOP_FOLDER_SCOPE.endsWith("/")
+			? TOP_FOLDER_SCOPE
+			: TOP_FOLDER_SCOPE + "/";
+		return file.path.startsWith(scopePrefix);
 	}
 
-	findAssetFolder(path: string): string | null {
-		const parts = path.split("/");
-		parts.pop();
-
-		while (parts.length > 0) {
-			const candidate = parts.join("/") + "/assets";
-
-			if (this.app.vault.getAbstractFileByPath(candidate)) {
-				return candidate;
-			}
-
-			parts.pop();
+	async findNearestAssetsFolder(start: TFolder): Promise<TFolder | null> {
+		let cur: TFolder | null = start;
+		while (cur) {
+			const child = cur.children.find(
+				(c) =>
+					c instanceof TFolder &&
+					c.name.toLowerCase() === ASSETS_DIR_NAME,
+			);
+			if (child instanceof TFolder) return child;
+			cur = cur.parent;
 		}
-
 		return null;
 	}
 
-	promptForFileName(defaultName: string): Promise<string> {
-		return new Promise((resolve) => {
-			const modal = new FilenameModal(this.app, defaultName, resolve);
-			modal.open();
-		});
+	async ensureAssetsUnder(folder: TFolder): Promise<TFolder | null> {
+		const path = normalizePath(
+			[folder.path === "/" ? "" : folder.path, ASSETS_DIR_NAME]
+				.filter(Boolean)
+				.join("/"),
+		);
+		const existing = this.app.vault.getAbstractFileByPath(path);
+		if (existing instanceof TFolder) return existing;
+		if (existing) {
+			new Notice(
+				`A non-folder named '${ASSETS_DIR_NAME}' exists at ${path}.`,
+			);
+			return null;
+		}
+		await this.app.vault.createFolder(path);
+		const created = this.app.vault.getAbstractFileByPath(path);
+		return created instanceof TFolder ? created : null;
+	}
+
+	defaultPasteBasename(): string {
+		const d = new Date();
+		const pad = (n: number) => n.toString().padStart(2, "0");
+		const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(
+			d.getDate(),
+		)}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+		return `Pasted image ${stamp}`;
+	}
+
+	sanitizeBase(s: string): string {
+		// Remove illegal filename chars and trim
+		const cleaned = s
+			.replace(/[\\/:*?"<>|]/g, " ")
+			.replace(/\s+/g, " ")
+			.trim();
+		// Avoid empty or dot-only names
+		if (!cleaned || /^[.]+$/.test(cleaned)) return "";
+		return cleaned;
+	}
+
+	getExtFromMime(mime: string | null): string | null {
+		if (!mime) return null;
+		const map: Record<string, string> = {
+			"image/png": "png",
+			"image/jpeg": "jpg",
+			"image/jpg": "jpg",
+			"image/webp": "webp",
+			"image/gif": "gif",
+			"image/svg+xml": "svg",
+			"image/heic": "heic",
+			"image/heif": "heif",
+		};
+		return map[mime] ?? null;
+	}
+
+	async getUniquePath(
+		folder: TFolder,
+		base: string,
+		ext: string,
+	): Promise<string> {
+		const dir = folder.path === "/" ? "" : folder.path;
+		const make = (i: number) =>
+			normalizePath(
+				[dir, i === 0 ? `${base}.${ext}` : `${base} ${i}.${ext}`]
+					.filter(Boolean)
+					.join("/"),
+			);
+		let i = 0;
+		let candidate = make(i);
+		while (this.exists(candidate)) {
+			i += 1;
+			candidate = make(i);
+		}
+		return candidate;
+	}
+
+	exists(path: string): boolean {
+		const f: TAbstractFile | null =
+			this.app.vault.getAbstractFileByPath(path);
+		return !!f;
 	}
 }
 
-class FilenameModal extends Modal {
-	defaultName: string;
-	onSubmit: (name: string) => void;
+class NamePromptModal extends Modal {
+	private resolve!: (v: string | null) => void;
+	private defaultBase: string;
+	private ext: string;
+	private resolved = false;
+	private inputEl!: HTMLInputElement;
 
-	constructor(
-		app: App,
-		defaultName: string,
-		onSubmit: (name: string) => void,
-	) {
+	constructor(app: App, defaultBase: string, ext: string) {
 		super(app);
-		this.defaultName = defaultName.replace(/\.[^/.]+$/, ""); // strip extension
-		this.onSubmit = onSubmit;
+		this.defaultBase = defaultBase;
+		this.ext = ext;
 	}
-	onOpen() {
+
+	static open(app: App, defaultBase: string, ext: string) {
+		return new Promise<string | null>((resolve) => {
+			const m = new NamePromptModal(app, defaultBase, ext);
+			m.resolve = resolve;
+			m.open();
+		});
+	}
+
+	onOpen(): void {
 		const { contentEl } = this;
+		contentEl.empty();
+		contentEl.createEl("h3", { text: "Name your image" });
 
-		contentEl.createEl("h2", {
-			text: "Enter image filename",
-		});
-
-		const input = contentEl.createEl("input", {
+		const wrapper = contentEl.createDiv({ cls: "ptna-input-wrap" });
+		this.inputEl = wrapper.createEl("input", {
 			type: "text",
-			value: this.defaultName,
+			value: this.defaultBase,
 		});
+		this.inputEl.style.width = "100%";
+		this.inputEl.focus();
+		this.inputEl.select();
 
-		input.focus();
-
-		input.addEventListener("keydown", (event) => {
-			if (event.key === "Enter") {
-				event.preventDefault();
-				this.close();
-				this.onSubmit(input.value || this.defaultName);
-			}
+		const hint = contentEl.createEl("div", {
+			text: `Extension will be .${this.ext}`,
 		});
+		hint.style.opacity = "0.7";
+		hint.style.fontSize = "12px";
+		hint.style.marginTop = "4px";
 
-		const submitButton = contentEl.createEl("button", { text: "Save" });
-
-		submitButton.onclick = () => {
-			this.close();
-			this.onSubmit(input.value || this.defaultName);
-		};
+		const buttons = contentEl.createDiv({ cls: "ptna-buttons" });
+		const saveBtn = buttons.createEl("button", { text: "Save" });
+		const cancelBtn = buttons.createEl("button", { text: "Cancel" });
+		saveBtn.addEventListener("click", () => this.finish());
+		cancelBtn.addEventListener("click", () => this.cancel());
+		this.inputEl.addEventListener("keydown", (e) => {
+			if (e.key === "Enter") this.finish();
+			if (e.key === "Escape") this.cancel();
+		});
 	}
 
-	onClose() {
-		this.contentEl.empty();
+	onClose(): void {
+		if (!this.resolved) this.resolve(null);
+	}
+
+	private finish() {
+		this.resolved = true;
+		const value = (this.inputEl?.value ?? "").trim();
+		this.close();
+		this.resolve(value || this.defaultBase);
+	}
+
+	private cancel() {
+		this.resolved = true;
+		this.close();
+		this.resolve(null);
 	}
 }
